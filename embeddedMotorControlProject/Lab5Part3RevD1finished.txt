@@ -1,0 +1,970 @@
+#include <asf.h>
+#include <math.h>
+void Simple_Clk_Init(void);
+void enable_port(void);
+void enable_tc_clocks(void);
+void enable_tc(void);
+void wait(int t);
+int counter = 0;
+int timecount = 0;
+//volatile float temp = 0;
+// Lab 3 stuff (where the motor is being controlled)
+void motor_control(void);
+void display_convert(float pr);	// this function converts the integer value that is meant to be displayed into characters stored in a array
+// pr is the passing route variable
+void getInput(void);  //get the users input, debounce and process numeric input, and change goal depending
+volatile float pr1;
+// EIC pointer and stuff
+Eic *porEic = EIC;
+volatile signed int ec = 0; // the edge counter
+volatile int w = 0;
+
+// ADC functions
+void enable_adc_clocks(void);
+void init_adc(void);
+int read_adc(void);
+Adc *porAdc = ADC;
+
+// DAC functions
+void configure_dac(void);
+void configure_dac_clock(void);
+Dac *porDac = DAC;
+
+// Interrupts function
+void interrupt_config(void);
+//void TC4_Handler(void);
+void enable_EIC_clocks(void);
+void config_EIC(void);
+// transfer function's variables
+volatile float v2=0, v1=0, u2=0, u1=0;   //I changed these to float to try something
+// transfer function's input and output
+volatile float u=0, v=0;
+// for the speed (PI) controller
+volatile float kp = 0.05;		// 0.07
+//0.015 is close to 1500 but tends to overshoot intially and then fall
+volatile float ki = 0.1;		// 0.06   //this value needs to be modified (based on Lec notes 6 pg 7)
+volatile float speed = 0.0;     //calculated next speed as difference of read speed and desired speed
+volatile float err = 0.0;
+volatile float RPMcmd = 0.0;    //output variable for user input of RPM
+volatile float prevRPMcmd = 0.0;  //buffer to store previous command to determine accel or deccel of user input change during operation
+volatile float integral = 0.0;
+volatile int userInput=0;
+volatile int entry=0;  //incrementer for writing to user input array
+volatile int multiplexer=0; //multiplexing variable for idle state display of user input
+
+// for the position (PID) controller (not sure if this is required)
+//$$$$Current Favorite PID Values$$$$$
+volatile float kp1 = 0.5;         //0.4
+volatile float kd = 0.002;       //0.002
+volatile float ki1 = 0.003;     //0.003 //0.006
+volatile float POScmd = 0.0;
+volatile float position = 0.0;
+volatile float err1 = 0.0;
+volatile float integral1 = 0.0;
+volatile float integralErr = 0.0;
+volatile float diff = 0.0;
+volatile int ec1 = 0;
+
+// keypad and user entry stuff
+void enable_config(int c);
+char key_scan(int row);
+void getNewRPMInput(void);     //function for checking if new user input was detected during speed control
+volatile bool newRPMInput = false;  //flag for detecting new user input during operation
+void LEDconfig(char k);
+volatile char new_key2 = 'z';   //variable for key press with obnoxious name
+volatile char tempKey = 'z';    //debouncing buffer variable to hold previous entry for comparison
+int LEDcounter = 0;            //counter to slow down LED blink so that you can tell speed control mode is on
+# define bounceLimit 5         //threshold bounce counter must exceed before input is processed
+volatile bool bounceRelease = true;   //to set condition of having a null input detected after input is processed, before processing more input
+volatile int bounceCount = 0;  //counter for debouncing
+char numb[4] = {'0','0','0','0'};
+volatile bool isPositive = true;
+
+// display stuff
+volatile bool ControlDis = false;		// enables the display to continuously show the encoder edge counting
+volatile bool RPMDisplay = true;	// enables the display to continuously show the measured RPM
+volatile int presscount = 0;
+volatile char tempPress = 'z';
+volatile int zerod = 0;
+char numb1[4] = {'0','0','0','0'};
+void LEDControlDis(void);
+volatile float puserInput = 0.0;
+//keypad and user entry stuff for position control mode
+
+int count=0;
+int a = 0;
+volatile unsigned int z = 0;    //variable for ADC read
+// state machine variables
+int s = 0; // state variable
+int Goal = 0;
+
+#define  perReg 156
+
+int main (void)
+{		
+	Simple_Clk_Init();
+	enable_port();
+	enable_adc_clocks();
+	init_adc();
+	enable_EIC_clocks();
+	config_EIC(); // not sure about some of the configs
+
+	/* Enable the timer*/
+	enable_tc();
+
+	//interrupt configs
+	NVIC_EnableIRQ(17);  //enable interrupt NMI line 17 for Timer/Counter 4
+	NVIC_SetPriority(17,1);  // medium priory , reading filtered position value to send to display
+	NVIC_EnableIRQ(18);  // enable interrupt NMI line 18 for Timer/Counter 5
+	NVIC_SetPriority(18,3);  // lowest priory,  controls the display and keypad function
+	NVIC_EnableIRQ(4);   // enable interrupt NMI line 4 for the EIC
+	NVIC_SetPriority(4,0);  // EIC , reads unfiltered encoder with highest priority interrupt to calculate RPM of motor
+	
+	while(1)    //dummy while(1) loop where we wait for interrupts
+	{
+
+	}
+}
+void TC5_Handler(void){  //lowest priority interrupt for display, keypad and state machine
+
+	Tc *tc2 = TC5;
+	TcCount8 *tcptr2 = &(tc2->COUNT8);
+	Tc *tc = TC4;
+	TcCount8 *tcptr = &(tc->COUNT8);
+	Port *ports = PORT;
+	PortGroup *portA = &(ports->Group[0]);
+	PortGroup *portB = &(ports->Group[1]);
+	
+	getInput();  //ridic god function that debounces & processes input, changes goal appropriately
+	
+	switch(s){  //STATE MACHINE
+		case 0:		// idle state (1)
+		if(RPMDisplay == false){
+			pr1 = v;   //revisit this after implementing user input, not doing anything now I think
+		}
+		//motor_control();
+		if(Goal == 3){
+			s = 1;
+		}
+		else if(Goal == 5){
+			s = 4;
+		}
+		else{
+			s = 0;
+		}
+		RPMDisplay = true;
+
+		if(Goal == 1){
+			tcptr->CC[0].reg = 0;
+			tcptr->CC[1].reg = 0;
+			numb[zerod] = '0';
+			zerod++;
+			if(zerod==4){
+				zerod=0;
+				Goal = 2;
+			}
+		}
+		break;
+		case 1:		// acceleration state (2)
+		if(isPositive==true){     //decode sign of user input RPM to motor voltage polarity
+			tcptr->CC[0].reg = speed;
+			tcptr->CC[1].reg = 0;
+		}
+		else if(isPositive==false){
+			tcptr->CC[0].reg = 0;
+			tcptr->CC[1].reg = speed;
+		}
+		if(RPMDisplay == false){
+			pr1 = v;
+		}
+		else if(RPMDisplay == true){
+			pr1 = userInput;
+		}
+		if((Goal == 3) && (w < RPMcmd+10) && (w > RPMcmd-10)){    //V is filtered RPM value, w is raw value
+			s = 2;  //go to speed control if within +/- 10 RPM of target speed and goal is 3
+		}
+		else if((Goal == 1) | (Goal == 5)){
+			s = 3;
+		}
+		break;
+		
+		case 2:		// Speed control state (3): maintain speed and accept change in target value
+		getNewRPMInput();
+		if(ControlDis == true){
+			LEDControlDis();
+		}
+		else if(RPMDisplay == false){
+			pr1 = v;
+		}
+		else if(RPMDisplay == true){
+			pr1 = userInput;
+		}
+		LEDcounter++;
+		if(LEDcounter>=10){
+			portB->OUTTGL.reg = 1<<9;   //start toggling LED every 10 passes through to indicate speed mode active
+			LEDcounter=0;
+		}
+		if((Goal == 1) | (Goal == 5)){
+			if(isPositive==true){
+				portB->OUTSET.reg = 1<<9;  //make sure LED is turned off on the way out if in positive mode
+			}
+			if(isPositive==false){
+				portB->OUTCLR.reg = 1<<9;  //make sure LED is turned on on the way out if in negative mode
+			}
+			s = 3;
+		}
+		break;
+		
+		case 3:		// deceleration state (4)
+		if(RPMDisplay == false){
+			pr1 = v;
+		}
+		else if(RPMDisplay == true){
+			pr1 = userInput;
+		}
+		if(isPositive==true){         //decoding target RPM sign into motor voltage polarity
+			tcptr->CC[0].reg = speed;
+			tcptr->CC[1].reg = 0;
+		}
+		else if(isPositive==false){
+			tcptr->CC[0].reg = 0;
+			tcptr->CC[1].reg = speed;
+		}
+		if(Goal == 1 && w < 10){  //if goal is 1 and speed is less than 5, go back to idle state
+			s = 0;
+			isPositive = true; //reset positive flag back to true
+			portB->OUTSET.reg = 1<<9;  //reset negative indicator to off
+		}
+		if(Goal == 3){  //if goal is 3, go back to acceleration state
+			s = 1;
+		}
+		if(Goal == 5 && w < 10){
+			s = 4;
+			tcptr->CC[0].reg = 0;
+			tcptr->CC[1].reg = 0;
+		}
+		break;
+		case 4:		// Position controller state (5)
+		if(ControlDis == true){
+			LEDControlDis();
+		}
+	    else if(RPMDisplay == false){
+			pr1 = abs(ec);   //variable to send to display the encoder count
+		}
+		else if(ControlDis == false && RPMDisplay == true){
+			userInput = puserInput;
+			pr1 = userInput;
+		}
+		LEDcounter++;
+		if(LEDcounter>=10){
+			portA->OUTTGL.reg = 1<<14;   //start toggling LED every 10 passes through to indicate speed mode active
+			LEDcounter=0;
+		}
+		if(err1>0){
+			tcptr->CC[0].reg = abs(position); // position;
+			tcptr->CC[1].reg = 0;
+		}
+		if(err1<0){
+			tcptr->CC[0].reg = 0;
+			tcptr->CC[1].reg = abs(position); // position;
+		}
+		if(Goal == 1){    //exit case for going back to idle state
+			s = 0;
+		}
+		else if(Goal == 3){    //exit case for going back to acceleration state
+			s = 1;
+		}
+		break;
+		
+	}
+	///////   $$$$$$$$ FEDERICO THIS IS YOUR OLD DISPLAY STUFF $$$$$$$$
+	//display_convert(pr1);   //put this back in after setting up user input
+	// display and keypad control function
+	//enable_config(pr1);   //also put this back in after setting up user input
+	
+	//THIS IS MY NEW DISPLAY STUFF FOR USER INPUT
+	// possibly move this somewhere else or make it into a condition 
+	if(s != 4){
+		portA->OUTSET.reg = 1<<14;   //start toggling LED every 10 passes through to indicate speed mode active
+	}
+
+	enable_config(multiplexer);
+	multiplexer++;
+	if(multiplexer==4){
+		multiplexer=0;
+	}
+	tcptr2->INTFLAG.reg = 0x1;  //reset handler flag
+}
+void TC4_Handler(void){//medium priority interrupt for position/speed control and digital filter
+	
+		//tc pointer definition so we can reset stuff in there
+		Tc *tc = TC4;
+		TcCount8 *tcptr = &(tc->COUNT8);
+		
+		float a0, b0;
+		// rpm cal
+		w = abs(((ec * 200. * 60.) / 380.));   //make sure w is being put through filter to calculate V and then displayed
+		// PID controller 
+		if(s == 4){
+			//if(ec > 400 || ec < -400){
+				//ec = 0;
+			//}
+			//integralErr =  ec;  
+			//error should be target position minus current position
+			err1 = POScmd-ec;    //err1 could be -400 to 400 by encoder counts, and per reg is 39 (possible values of CC register), so multiplying error by 39/400
+			//Check the integral...I think we are integrating wrong in an unsigned way that is causing instability
+			integral1 = integral1 + (.005 * ec);
+			diff = (err1 - ec1);//*200;  //this used to be ec-ec1
+			position = 0.39*((kp1 * err1) + (ki1 * integral1) + (kd * diff));  //should kd be negative or positive?  slides show both ways :(
+			ec1 = err;  //this used to be ec1=ec
+		}
+		// PI controller
+		else { 
+			err = (RPMcmd - w);    //calculate error as the difference between desired RPM and the calculated RPM
+			integral = integral + (.005 * err);
+			speed = 0.39*((kp * err) + (ki * integral));//calculate speed as weighted sum of proportion factor times error and error integral  
+			ec = 0;
+		}
+		//ec = 0; //reset edge counter for encoder
+		// first order low pass filter 
+		b0 = 0.03093;
+		a0 = -0.9691;
+		//u = read_adc()/4;		// temporary 
+		v = -a0*v1 + b0*w;
+		//porDac->DATA.reg = v;	// temporary
+		v1 = v;
+		tcptr-> INTFLAG.reg = 0x1;  // reset interrupt flag in TC register to zero before exiting Interrupt service handler
+}
+void EIC_Handler(void){
+	//highest priority interrupt
+	// external interrupt for the motor encoder 
+	// could possibly merger with the TC4_Handler, unsure about that part
+	Port *ports = PORT;
+	//PortGroup *portA = &(ports->Group[0]);
+	PortGroup *portB = &(ports->Group[1]);
+	
+	if (portB->IN.reg & 1<<14){   //check phase relationship of encoder signals and increment or decrement encoder counter
+		ec--;     //motor is rotating clockwise
+	}
+	else{
+		ec++;    //motor is rotating counter clockwise
+	}
+	porEic->INTFLAG.reg = 1<<8; // clears interrupt flag set at EXTINT[8] before exiting handler routine
+}
+void getInput(void){   //gets user input, debounces and processes numeric input, and begins state changes
+	Port *ports = PORT;
+	PortGroup *portB = &(ports->Group[1]);
+	if(new_key2 == 'z'){
+		bounceRelease = true;  //set to false after input is processed,
+		//only reset to true if null input detected
+		//don't process further input until this is true
+	}
+	if(new_key2 == 'a'){
+		isPositive = false;  //if A button is pressed, toggle the negative flag
+		portB->OUTCLR.reg = 1<<9;
+		new_key2 = 'z';
+		pr1 = v;
+	}
+	else if(new_key2 == 'b'){   //if B is pressed, stop rotating and enter position control mode
+		Goal = 5;
+		RPMcmd = 0.0;
+		userInput = atoi(numb);
+		POScmd = userInput;
+		puserInput = userInput;
+
+		if(isPositive == true){
+			POScmd = (-1) * POScmd;
+		}
+		new_key2 = 'z';
+		ControlDis = true;
+		tempPress = 'b';
+	}
+	else if(new_key2 == 'c'){   //if C button is pressed, set RPMcmd to userInput
+		userInput = (atoi(numb));
+		prevRPMcmd = RPMcmd;
+		RPMcmd = userInput;
+		new_key2 = 'z';
+		Goal = 3;
+		if(s==2){
+			newRPMInput=true;
+		}
+		ControlDis = true;
+		tempPress = 'c';
+	}
+	else if (new_key2 == 'd'){  //if D is pressed, enter deacceleration mode
+		Goal = 1;
+		RPMcmd = 0.0;
+		for(int i=0; i<4; i++){
+			numb[i]='0';
+		}
+		if( s == 4){
+			isPositive = true;
+			portB->OUTSET.reg = 1<<9;
+			//integral1 = 0;
+			//diff = 0;
+			//err1 = 0;
+		}
+		new_key2='z';
+		//userInput=0;   //reset all user input variables for next pass through
+	}
+	else if ((new_key2 == '#')){
+		RPMDisplay = true;
+		ControlDis = false;
+		display_convert(pr1);
+		enable_config(pr1);
+	}
+	else if (new_key2 == '*' || RPMDisplay == false){
+		ControlDis = false;
+		RPMDisplay = false;
+		display_convert(pr1);
+		enable_config(pr1);
+		//while(new_key2 == '*'){
+		//RPMDisplay = true;
+	}
+	else if((new_key2 != 'z')&&(bounceRelease==true)){   //write the numeric key input to the numb array
+		if(tempKey == new_key2){
+			bounceCount++;
+		}
+		else if(new_key2 != tempKey){
+			bounceCount=0;
+		}
+		if(bounceCount>bounceLimit){
+			numb[entry]=new_key2;
+			numb1[entry] = new_key2;
+			bounceRelease=false;
+			entry++;
+			if(entry==4){
+				entry=0;
+			}
+			bounceCount=0;
+			new_key2 = 'z';
+			tempKey = 'z';
+		}
+		tempKey = new_key2;
+	}
+}
+
+void getNewRPMInput(void){
+	if(newRPMInput == true){   //if C button is pressed, set RPMcmd to userInput
+		//int prevTarget = RPMcmd;   //copy old user input to buffer variable for comparison
+		//userInput = (atoi(numb));
+		//RPMcmd = userInput;
+		if(prevRPMcmd<RPMcmd){//if prev speed target is lower than new target
+			Goal = 3;   //accelerate
+			s = 1;
+		}
+		if(prevRPMcmd>RPMcmd){ //if prev speed target is higher than new target
+			Goal = 1;
+			s = 3;  //decelerate
+		}
+		//Goal = 3;
+		newRPMInput = false;  //reset newInput flag
+	}
+}
+void LEDControlDis(void){
+	if(s == 2){
+		numb[0] = 'S';
+		numb[1] = 'P';
+		numb[2] = 'd';
+		numb[3] = 'C';
+		return;
+	}
+	if(s == 4){
+		numb1[0] = 'P';
+		numb1[1] = 'o';
+		numb1[2] = 'S';
+		numb1[3] = 'C';
+		return;
+	}
+}
+void config_EIC(void){
+
+	 porEic->CTRL.reg = 0x00;	// disables EIC
+	 porEic->EVCTRL.reg = 1<<8|1<<14;
+	 porEic->WAKEUP.reg = 1<<8|1<<14;
+	 porEic->CONFIG[1].bit.SENSE0 = 0x1; // setting up PA28 to be the rising edge 
+	 porEic->INTENSET.reg = 1<<8|1<<14;
+	 porEic->CTRL.reg |= 0x2;	// enables EIC
+}
+// some of these values have to change not sure what the voltage reference is anymore 
+void display_convert(float pr){
+	numb[0]=(pr/1000);												// 1000th place
+	numb[1]=(pr-(numb[0]*1000))/100;								// 100th place
+	numb[2]=(pr-(numb[0]*1000)-(numb[1]*100))/10;					// 10th place
+	numb[3]=(pr-(numb[0]*1000)-(numb[1]*100)-(numb[2]*10))/1;
+	// converts the integers stored in the array into characters in order to display the value
+	for(int j=0; j<4; j++){
+		numb[j] = numb[j] + 48;
+	}
+}
+void motor_control(void){
+	Tc *tc = TC4;
+	TcCount8 *tcptr = &(tc->COUNT8);
+	
+	u = (read_adc()/4.096) * 3.3;
+	// implementing the motor
+	// the dead zone where the motor should pause
+	if(u>1600 && u<1700){
+		tcptr->CC[0].reg = 155;
+		tcptr->CC[1].reg = 155;
+	}
+	// spins the motor counter clockwise due to PA22 > PA23
+	else if(u<1600){
+		tcptr->CC[0].reg = 155;
+		tcptr->CC[1].reg = (u/1600.) * 155;
+		//l = (x/1600.) * 250;		// checking the CC reg value
+	}
+	// spins the motor clockwise due to PA22 < PA23
+	else if(u>1700){
+		tcptr->CC[0].reg = ((3300. - u)/1600.) * 155;
+		tcptr->CC[1].reg = 155;
+		//l = ((3300. - x)/1600.) * 250;
+	}
+}
+void enable_port(void)
+{
+	//setup pins
+	Port *ports = PORT;
+	PortGroup *portB = &(ports->Group[1]);
+	
+	PortGroup *portA = &(ports->Group[0]);
+	
+	portB->DIRSET.reg = 1<<9;  //enable pin 9 for negative indicator LED
+	portB->OUTSET.reg = 1<<9;  //initialize the LED to off state
+	
+	portA->DIR.reg = 1<<14;
+	portA->DIRSET.reg = 1<<23|1<<22|1<<13|1<<7|1<<6|1<<5|1<<4;
+	portA->OUTSET.reg = 1<<13;						//set pot positive rail high
+
+	//set pins to input to read keypad input from PA19-PA16, corresponding to columns 1-4
+	portA->DIRCLR.reg = 1<<16|1<<17|1<<18|1<<19;
+
+	portA->PINCFG[19].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	portA->PINCFG[18].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	portA->PINCFG[17].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	portA->PINCFG[16].reg = PORT_PINCFG_INEN | PORT_PINCFG_PULLEN;
+	
+	portA->DIRCLR.reg = 1<<11;						//set PA11 as input to read potentiometer wiper
+	portA->DIRSET.reg = 1<<2;             //configure PA02 as an output to write the output wave from the DAC
+	// both PA28 and PB14 are set as external interrupt input pins
+	portA->DIRCLR.reg = 1<<28;
+	portB->DIRCLR.reg = 1<<14;
+	portA->PMUX[14].bit.PMUXE = 0x0;
+	portA->PINCFG[28].bit.PMUXEN = 1;
+	portB->PMUX[7].bit.PMUXE = 0x0;
+	portB->PINCFG[14].bit.PMUXEN = 1;
+	// config PA02 to be owned by the DAC peripheral
+	portA->PMUX[1].bit.PMUXE = 0x1;			// set to correct peripheral
+	portA->PINCFG[2].bit.PMUXEN = 1;		// set to correct pin configuration
+
+	// config PA11 to be owned by ADC Peripheral
+		
+	portA->PMUX[5].bit.PMUXO = 0x1;		//refer to pg304 data sheet
+	portA->PINCFG[11].bit.PMUXEN = 1;	//refer to pg304 data sheet
+	// TC PMUX  $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+	portA->PMUX[11].bit.PMUXO = 0x5;     //(2n)=22 and (2n + 1) = 23 therefor n = 11, TC peripheral is F = 0x5
+	portA->PMUX[11].bit.PMUXE = 0x5;
+	portA->PINCFG[22].bit.PMUXEN = 1;    //enable peripheral function on pin 22
+	portA->PINCFG[23].bit.PMUXEN = 1;	// enable peripheral function on pin 23
+	
+}
+void enable_EIC_clocks(void){
+	PM->APBAMASK.reg |= 0x1 << 6; // PM_APBAMASK for EIC is in 6th bit
+	uint32_t temp= 0x03;		// ID for EIC 
+	temp |= 0<<8;         			//  Selection Generic clock generator 0
+	GCLK->CLKCTRL.reg=temp;   		//  Setup in the CLKCTRL register
+	GCLK->CLKCTRL.reg |= 0x1u << 14;
+}
+void enable_tc_clocks(void)
+{
+	
+	PM->APBCMASK.reg |= 0x1<<12;  	// PM_APBCMASK for TC4 is in the 0x12 position
+	PM->APBCMASK.reg |= 0x1<<13;	// PM_APBCMASK for TC5 is in the 0x13 position 
+	
+	uint32_t temp= 0x15;   		// ID for TC4 is 0x14 (see table 14-2)
+	temp |= 0<<8;         			//  Selection Generic clock generator 0
+	GCLK->CLKCTRL.reg=temp;   		//  Setup in the CLKCTRL register
+	GCLK->CLKCTRL.reg |= 0x1u << 14;    	// enable it.     
+}
+
+/* Configure the basic timer/counter to have a period of________ or a frequency of _________  */
+void enable_tc(void)
+{
+	
+	enable_tc_clocks();
+	// pointers our first (second) timer/counter (filter and position/speed control)
+	Tc *tc = TC4;
+	TcCount8 *tcptr = &(tc->COUNT8);
+
+	// pointers our second (first) timer/counter (display and keypad)
+	Tc *tc2 = TC5;
+	TcCount8 *tcptr2 = &(tc2->COUNT8);
+	
+	// disables timer/counters
+	tcptr->CTRLA.reg = 0<<1;
+	tcptr2->CTRLA.reg = 0<<1;
+
+	// register values for first timer/counter
+	tcptr->CTRLA.bit.MODE = 0x1;		// setting the counter to 8-bit mode
+	tcptr->CTRLA.bit.WAVEGEN = 0x2;   //set wavegen to normal PWM mode
+	//prescaler value of  will divide Gclk by 16, giving us a 500KHz counter cycle frequency.  This will be able to cycle through 255 duty cycle values of a sine wave at 2KHz
+	//this was prescaler value of 7, trying 6 for 256
+	tcptr->CTRLA.bit.PRESCALER = 0x6;	// divides the GCLK_TC and equals our prescaler clk //maybe have to have to change value (@ 7.8kHz), 0x7 is biggest division value
+	tcptr->CTRLA.bit.PRESCSYNC = 0x1;	// setting the counter to reset on the prescaler clk
+	/* Write a suitable value to fix duty cycle and period.*/
+	tcptr->CTRLC.reg = 1<<5|1<<4;           //enable cc[1] to capture with 1 in fifth bit, disable (compare mode) with 0.  Fourth bit is CC[0].
+	tcptr->PER.reg = perReg;            //8 bit register, max value of 255 set by perReg variable
+
+	// register values for second timer/counter
+	tcptr2->CTRLA.bit.MODE = 0x1;
+	tcptr2->CTRLA.bit.WAVEGEN = 0x2;
+	tcptr2->CTRLA.bit.PRESCALER = 0x7;
+	tcptr2->CTRLA.bit.PRESCSYNC = 0x1;
+	tcptr2->PER.reg = 130.;
+
+	// enabling both timer/counters 
+	tcptr->CTRLA.reg |= 1<<1;      
+	tcptr2->CTRLA.reg |= 1<<1;
+	
+	//$$$$$$$$$$$$$$$$$$$$  INTERRUPT SETUP STUFF IN TC TO SET OVERFLOW TO INTERRUPT OUTPUT
+	tcptr->INTENSET.reg = 1 << 0;     //set first bit in TC INTENSET register for interrupt flag on period reg overflow  
+	tcptr2->INTENSET.reg = 1 << 0;
+
+
+}
+
+int read_adc(void)
+{
+
+	// start the conversion
+	porAdc->SWTRIG.bit.START = 1;
+
+	
+	while(!( porAdc->INTFLAG.bit.RESRDY));		//wait for conversion to be available
+	z = porAdc->RESULT.reg;     
+	return(z); 					//insert register where ADC store value
+	
+}
+
+// set up generic clock for ADC
+void enable_adc_clocks(void)
+{
+	PM->APBCMASK.reg |= 01u<<16; 			// PM_APBCMASK for ADC is in the 16 bit position
+	
+	uint32_t temp = 0x17; 			// ID for ADC is 0x17 (see table 14-2)
+	temp |= 0<<8; 					// Selection Generic clock generator 0
+	GCLK->CLKCTRL.reg = temp; 			// Setup in the CLKCTRL register
+	GCLK->CLKCTRL.reg |= 0x1u << 14; 		// enable it.
+}
+
+// initialize the on-board ADC system
+void init_adc(void)
+{
+	porAdc->CTRLA.reg = 0<<1;				//ADC block is disabled while we configure
+	// you will need to configure 5 registers
+	// just experimenting with some values
+	porAdc->REFCTRL.bit.REFSEL = 0x2;        //changed from 2 to 7 to enable offset compensation
+	porAdc->AVGCTRL.bit.SAMPLENUM = 0x4;    //taking 4 samples   //try reducing this $$$$$$$$$$$
+	porAdc->AVGCTRL.bit.ADJRES = 0x4;       //average reading for 4 samples (divide by 2^n)
+	porAdc->SAMPCTRL.bit.SAMPLEN = 0;       // this value is just random number to test
+	porAdc->CTRLB.bit.PRESCALER = 0x7;    //THIS WAS SET TO 7 FOR SOME REASON
+	porAdc->CTRLB.bit.RESSEL = 0x1;         //resolution set to take average of samples
+	//(muxpos, muxneg, gain)
+	porAdc->INPUTCTRL.bit.GAIN = 0xF;        //gain set to 1/2
+	porAdc->INPUTCTRL.bit.MUXNEG = 0x18;     //Ground connection, 0x19 is IO ground
+	porAdc->INPUTCTRL.bit.MUXPOS = 0x13;     //muxpos is set to PA11
+	porAdc->CTRLA.reg = 1<<1;				//Enable ADC
+}
+void configure_dac_clock(void)
+{
+	PM->APBCMASK.reg |= 1<<18; 			// PM_APBCMASK for DAC is in the 18 bit position
+	uint32_t temp = 0x1A; 			// ID for the DAC is 0x1A (see table 14-2)
+	temp |= 0<<8; 					// Selection Generic clock generator 0
+	GCLK->CLKCTRL.reg = temp; 			// Setup in the CLKCTRL register
+	GCLK->CLKCTRL.reg |= 0x1u << 14; 		// enable it.
+}
+
+void configure_dac(void)
+{
+	while (porDac->STATUS.reg & DAC_STATUS_SYNCBUSY) {
+		/* Wait until the synchronization is complete */
+	}
+
+	/* Enable selected output with CTRLB, which can only be written to while DAC is not enabled*/
+	porDac->CTRLA.reg = 0<<1;   //disable DAC module while CTRLB is written
+	porDac->CTRLB.bit.EOEN = 1;      //To enable the DAC output on the VOUT pin, the output driver must be enabled
+	/* Set reference voltage with CTRLB */
+	porDac->CTRLB.bit.REFSEL = 0x1;            //set reference voltage to 3.3 volts
+	//by writing a one to the External Output Enable bit in the Control B register (CTRLB.EOEN).
+	
+	/* Enable the DAC module with CTRLA */
+	porDac->CTRLA.reg = 0x2;      //Marcus said check this out it should be 2....but we had 1 << 1 which is 2
+
+}
+void enable_config(int c){    //void function to control LED enable and numpad rows
+
+	//sets the base address for the Port structure to PORT_INSTS or 0x41004400
+	Port *ports = PORT;
+
+	//sets the group offset for the structure PortGroup in this case it is for group[0] or groupA
+	// GroupA offset of 0x00				// GroupB offset of 0x80
+	PortGroup *portA = &(ports->Group[0]);
+	//write to display number 0
+	new_key2 = 'z';           //this seems to erase things in spite of my best efforts when left in
+	c = 0;
+
+	portA->OUTSET.reg = 1<<7|1<<6|1<<5|1<<4; //turn off all displays before changing LED configuration to the new entry
+	LEDconfig(numb[c]);		//reads which LED number should be displayed on the first segment
+	portA->OUTCLR.reg = 1<<7; //write PA7 low to enable display zero and the first row of buttons
+	key_scan(c);
+	c++;
+
+	wait(1);
+		
+	portA->OUTSET.reg = 1<<7|1<<6|1<<5|1<<4;//turn off all number displays
+	LEDconfig(numb[c]);		//reads which LED number should be displayed on the second segment
+	portA->OUTCLR.reg = 1<<6; //write PA6 low to enable display number 1 and write the appropriate LED configuration
+	key_scan(c);
+	c++;
+
+	wait(1);
+		
+	portA->OUTSET.reg = 1<<7|1<<6|1<<5|1<<4;  //turn off other number displays
+	LEDconfig(numb[c]);		//reads which LED number should be displayed on the third segment
+	portA->OUTCLR.reg = 1<<5;  //write PA5 low to enable number 2
+	key_scan(c);
+	c++;
+
+	wait(1);
+		
+	portA->OUTSET.reg = 1<<7|1<<6|1<<5|1<<4;  //turn off other number displays
+	LEDconfig(numb[c]);		//reads which LED number should be displayed on the forth segment
+	portA->OUTCLR.reg = 1<<4;  //write PA4 low to enable number 3
+	key_scan(c);
+	c = 0;
+
+	wait(1);
+
+	portA->OUTSET.reg = 1<<7|1<<6|1<<5|1<<4;		//turns off all the LEDs at the end to allow a new entry
+
+	return;
+}
+char key_scan(int row)
+{
+	Port *ports = PORT;
+	PortGroup *portA = &(ports->Group[0]);
+
+	switch(row){
+		case 0:
+		if(portA->IN.reg & 1<<19){
+			new_key2='1';
+			//1 has been pressed
+		}
+		if(portA->IN.reg & 1<<18){
+			new_key2='2';
+		}
+		if(portA->IN.reg & 1<<17){
+			new_key2='3';
+		}
+		if(portA->IN.reg & 1<<16){
+			new_key2='a';
+		}
+		break;
+		case 1:
+		if(portA->IN.reg & 1<<19){
+			new_key2='4';
+		}
+		if(portA->IN.reg & 1<<18){
+			new_key2='5';
+		}
+		if(portA->IN.reg & 1<<17){
+			new_key2='6';
+		}
+		if(portA->IN.reg & 1<<16){
+			new_key2='b';
+		}
+		break;
+		case 2:
+		if(portA->IN.reg & 1<<19){
+			new_key2='7';
+		}
+		if(portA->IN.reg & 1<<18){
+			new_key2='8';
+		}
+		if(portA->IN.reg & 1<<17){
+			new_key2='9';
+		}
+		else if(portA->IN.reg & 1<<16){
+			new_key2='c';
+		}
+		break;
+		case 3:
+		if(portA->IN.reg & 1<<19){
+			new_key2='*';
+		}
+		if(portA->IN.reg & 1<<18){
+			new_key2='0';
+		}
+		if(portA->IN.reg & 1<<17){
+			new_key2='#';
+		}
+		if(portA->IN.reg & 1<<16){
+			new_key2='d';
+		}
+		break;
+	}
+	
+	return('z');
+	//break;
+	//return;
+
+}
+void LEDconfig(char k)
+{
+	Port *ports = PORT;
+	PortGroup *portB = &(ports->Group[1]);
+
+	portB->DIRSET.reg = 1<<0|1<<1|1<<2|1<<3|1<<4|1<<5|1<<6|1<<7;
+	portB->OUTSET.reg = 1<<0|1<<1|1<<2|1<<3|1<<4|1<<5|1<<6|1<<7;
+
+	if(k == '0'){
+		portB->OUTSET.reg = 1<<6;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<2|1<<3|1<<4|1<<5;
+		return;
+	}
+
+	if(k == '1'){
+		portB->OUTSET.reg = 1<<0|1<<3|1<<4|1<<5|1<<6;
+		portB->OUTCLR.reg = 1<<1|1<<2;
+		return;
+	}
+
+	if(k == '2'){
+		portB->OUTSET.reg = 1<<2|1<<5;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<3|1<<4|1<<6;
+
+		return;
+	}
+
+	if(k == '3'){
+		portB->OUTSET.reg = 1<<4|1<<5;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<2|1<<3|1<<6;
+		return;
+	}
+
+	if(k == '4'){
+		portB->OUTSET.reg = 1<<0|1<<3|1<<4;
+		portB->OUTCLR.reg = 1<<1|1<<2|1<<5|1<<6;
+		return;
+	}
+
+	if(k == '5'){
+		portB->OUTSET.reg = 1<<1|1<<4;
+		portB->OUTCLR.reg = 1<<0|1<<2|1<<3|1<<5|1<<6;
+		return;
+	}
+
+	if(k == '6'){
+		portB->OUTSET.reg = 1<<1;
+		portB->OUTCLR.reg = 1<<0|1<<2|1<<3|1<<4|1<<5|1<<6;
+		return;
+	}
+
+	if(k == '7'){
+		portB->OUTSET.reg = 1<<3|1<<4|1<<6;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<2|1<<5;
+		return;
+	}
+
+	if(k == '8'){
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<2|1<<3|1<<4|1<<5|1<<6;
+		return;
+	}
+
+	if(k == '9'){
+		portB->OUTSET.reg = 1<<4;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<2|1<<3|1<<5|1<<6;
+		return;
+	}
+	
+	if( k == 'S'){
+		portB->OUTSET.reg = 1<<1|1<<4;
+		portB->OUTCLR.reg = 1<<0|1<<6|1<<5|1<<2|1<<3;
+	}
+	if(k == 'P'){
+		portB->OUTSET.reg = 1<<2|1<<3;
+		portB->OUTCLR.reg = 1<<0|1<<1|1<<4|1<<5|1<<6;
+	}
+	if(k == 'd'){
+		portB->OUTSET.reg = 1<<0|1<<5;
+		portB->OUTCLR.reg = 1<<1|1<<2|1<<3|1<<4|1<<6;
+	}
+	if(k == 'o'){
+		portB->OUTSET.reg = 1<<0|1<<1|1<<5;
+		portB->OUTCLR.reg = 1<<2|1<<3|1<<4|1<<6;
+	}
+	if(k == 'C'){
+		portB->OUTSET.reg = 1<<6|1<<1|1<<2;
+		portB->OUTCLR.reg = 1<<0|1<<3|1<<4|1<<5;
+	}
+	if(k == 'E'){
+		portB->OUTSET.reg = 1<<1|1<<2;
+		portB->OUTCLR.reg = 1<<0|1<<3|1<<4|1<<5|1<<6;
+	}
+	if(k == 'r'){
+		portB->OUTSET.reg = 1<<0|1<<1|1<<2|1<<3|1<<5;
+		portB->OUTCLR.reg = 1<<4|1<<6;
+	}
+	return;
+	return;
+
+}
+void wait(int t)
+{
+	timecount = 0;
+	while (timecount < t*1000)
+	{
+		timecount++;
+	}
+}
+//Simple Clock Initialization
+void Simple_Clk_Init(void)
+{
+	/* Various bits in the INTFLAG register can be set to one at startup.
+	   This will ensure that these bits are cleared */
+	
+	SYSCTRL->INTFLAG.reg = SYSCTRL_INTFLAG_BOD33RDY | SYSCTRL_INTFLAG_BOD33DET |
+			SYSCTRL_INTFLAG_DFLLRDY;
+			
+	system_flash_set_waitstates(0);  		//Clock_flash wait state =0
+
+	SYSCTRL_OSC8M_Type temp = SYSCTRL->OSC8M;      	/* for OSC8M initialization  */
+
+	temp.bit.PRESC    = 0;    			// no divide, i.e., set clock=8Mhz  (see page 170)
+	temp.bit.ONDEMAND = 1;    			//  On-demand is true
+	temp.bit.RUNSTDBY = 0;    			//  Standby is false
+	
+	SYSCTRL->OSC8M = temp;
+
+	SYSCTRL->OSC8M.reg |= 0x1u << 1;  		// SYSCTRL_OSC8M_ENABLE bit = bit-1 (page 170)
+	
+	PM->CPUSEL.reg = (uint32_t)0;    		// CPU and BUS clocks Divide by 1  (see page 110)
+	PM->APBASEL.reg = (uint32_t)0;     		// APBA clock 0= Divide by 1  (see page 110)
+	PM->APBBSEL.reg = (uint32_t)0;     		// APBB clock 0= Divide by 1  (see page 110)
+	PM->APBCSEL.reg = (uint32_t)0;     		// APBB clock 0= Divide by 1  (see page 110)
+
+	PM->APBAMASK.reg |= 01u<<3;   			// Enable Generic clock controller clock (page 127)
+
+	/* Software reset Generic clock to ensure it is re-initialized correctly */
+
+	GCLK->CTRL.reg = 0x1u << 0;   			// Reset gen. clock (see page 94)
+	while (GCLK->CTRL.reg & 0x1u ) {  /* Wait for reset to complete */ }
+	
+	// Initialization and enable generic clock #0
+
+	*((uint8_t*)&GCLK->GENDIV.reg) = 0;  		// Select GCLK0 (page 104, Table 14-10)
+
+	GCLK->GENDIV.reg  = 0x0100;   		 	// Divide by 1 for GCLK #0 (page 104)
+
+	GCLK->GENCTRL.reg = 0x030600;  		 	// GCLK#0 enable, Source=6(OSC8M), IDC=1 (page 101)
+}
